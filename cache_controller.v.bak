@@ -1,0 +1,426 @@
+// =============================================================================
+// cache_controller.v
+// Top-Level Cache Controller FSM
+//
+// Implements a 4-way set-associative cache controller with:
+//   - LRU replacement policy
+//   - Write-back + write-allocate write policy
+//
+// Address breakdown (32-bit):
+//   [31:13] -> TAG   (19 bits)
+//   [12:6]  -> INDEX  (7 bits, 128 sets)
+//   [5:0]   -> OFFSET (6 bits, 64-byte block)
+//              [5:2]  -> word offset (4 bits, 16 words)
+//              [1:0]  -> byte offset (2 bits, unused at word granularity)
+//
+// FSM States:
+//   IDLE       - waiting for a CPU request
+//   READ_HIT   - data found in cache, return to CPU
+//   READ_MISS  - data not in cache, may need eviction then fetch
+//   WRITE_HIT  - data found, update word in cache block (mark dirty)
+//   WRITE_MISS - data not found, allocate block (write-allocate)
+//   EVICT      - write dirty victim block back to main memory
+// =============================================================================
+
+module cache_controller (
+    input  wire        clk,
+    input  wire        rst,
+
+    // ----- CPU Interface -----
+    input  wire        cpu_req,         // CPU requests a cache operation
+    input  wire        cpu_rw,          // 0 = Read, 1 = Write
+    input  wire [31:0] cpu_addr,        // 32-bit byte address
+    input  wire [31:0] cpu_wr_data,     // Data to write (write requests)
+    output reg  [31:0] cpu_rd_data,     // Data returned to CPU (read requests)
+    output reg         cpu_ready,       // Asserted when operation is complete
+
+    // ----- Main Memory Interface -----
+    output reg         mem_req,         // Request to main memory
+    output reg         mem_rw,          // 0 = Read from mem, 1 = Write to mem
+    output reg  [31:0] mem_addr,        // Byte address for memory access
+    output reg  [511:0] mem_wr_data,    // Block to write back (evict)
+    input  wire [511:0] mem_rd_data,    // Block fetched from memory
+    input  wire        mem_ready        // Memory operation complete
+);
+
+    // =========================================================================
+    // Address field extraction
+    // =========================================================================
+    wire [18:0] addr_tag    = cpu_addr[31:13];
+    wire [6:0]  addr_index  = cpu_addr[12:6];
+    wire [3:0]  addr_word   = cpu_addr[5:2];   // Word offset within block
+
+    // =========================================================================
+    // FSM State encoding
+    // =========================================================================
+    localparam IDLE        = 3'd0;
+    localparam READ_HIT    = 3'd1;
+    localparam READ_MISS   = 3'd2;
+    localparam WRITE_HIT   = 3'd3;
+    localparam WRITE_MISS  = 3'd4;
+    localparam EVICT       = 3'd5;
+
+    reg [2:0] state, next_state;
+
+    // =========================================================================
+    // Internal signals
+    // =========================================================================
+    // Hit detection
+    reg  [1:0]  hit_way;            // Which way matched
+    reg         cache_hit;          // Hit flag
+
+    // Way iteration for hit check
+    integer w;
+
+    // Victim way from LRU controller
+    wire [1:0] lru_way_out;
+
+    // Saved victim way (registered so it stays stable through EVICT)
+    reg [1:0] victim_way;
+
+    // Memory array read outputs (one per way, muxed)
+    wire [511:0] rd_data_out;
+    wire [18:0]  rd_tag_out;
+    wire         rd_valid_out;
+    wire         rd_dirty_out;
+
+    // Tags/valid/dirty for all 4 ways (read combinationally via sub-reads)
+    // We implement a small per-way read by issuing four reads sequentially.
+    // For synthesis simplicity we read all four ways combinationally using
+    // a generate block approach wired to four read ports on the memory array.
+    // Since memory_array has one read port, we use registered reads and a
+    // state-machine sequencer. However, for simulation clarity we model
+    // the tag/valid/dirty check directly in the FSM using the array outputs
+    // sampled each clock.
+
+    // Because we need to compare all 4 ways simultaneously for hit detection,
+    // we maintain a small shadow of tags, valid, dirty bits as registers
+    // that we load in IDLE.
+    reg [18:0] way_tag   [0:3];
+    reg        way_valid [0:3];
+    reg        way_dirty [0:3];
+    reg [511:0] way_data [0:3];
+
+    // Memory array ports (driven by FSM)
+    reg  [6:0]  ma_rd_index;
+    reg  [1:0]  ma_rd_way;
+    reg         ma_wr_en;
+    reg  [6:0]  ma_wr_index;
+    reg  [1:0]  ma_wr_way;
+    reg  [511:0] ma_wr_data;
+    reg  [18:0] ma_wr_tag;
+    reg         ma_wr_valid;
+    reg         ma_wr_dirty;
+    reg         ma_word_wr_en;
+    reg  [6:0]  ma_word_wr_index;
+    reg  [1:0]  ma_word_wr_way;
+    reg  [3:0]  ma_word_wr_offset;
+    reg  [31:0] ma_word_wr_data;
+    reg         ma_word_wr_dirty;
+
+    // LRU update ports
+    reg         lru_update_en;
+    reg  [6:0]  lru_update_index;
+    reg  [1:0]  lru_update_way;
+
+    // Counter for reading all 4 ways in IDLE
+    reg [1:0] read_way_cnt;
+    reg       ways_loaded;  // All 4 ways read for current set
+
+    // =========================================================================
+    // Sub-module instantiations
+    // =========================================================================
+    memory_array u_mem (
+        .clk            (clk),
+        .rst            (rst),
+        .rd_index       (ma_rd_index),
+        .rd_way         (ma_rd_way),
+        .rd_data        (rd_data_out),
+        .rd_tag         (rd_tag_out),
+        .rd_valid       (rd_valid_out),
+        .rd_dirty       (rd_dirty_out),
+        .wr_en          (ma_wr_en),
+        .wr_index       (ma_wr_index),
+        .wr_way         (ma_wr_way),
+        .wr_data        (ma_wr_data),
+        .wr_tag         (ma_wr_tag),
+        .wr_valid       (ma_wr_valid),
+        .wr_dirty       (ma_wr_dirty),
+        .word_wr_en     (ma_word_wr_en),
+        .word_wr_index  (ma_word_wr_index),
+        .word_wr_way    (ma_word_wr_way),
+        .word_wr_offset (ma_word_wr_offset),
+        .word_wr_data   (ma_word_wr_data),
+        .word_wr_dirty  (ma_word_wr_dirty)
+    );
+
+    lru_controller u_lru (
+        .clk            (clk),
+        .rst            (rst),
+        .update_en      (lru_update_en),
+        .update_index   (lru_update_index),
+        .update_way     (lru_update_way),
+        .query_index    (addr_index),
+        .lru_way        (lru_way_out)
+    );
+
+    // =========================================================================
+    // Sequential state register
+    // =========================================================================
+    always @(posedge clk or posedge rst) begin
+        if (rst)
+            state <= IDLE;
+        else
+            state <= next_state;
+    end
+
+    // =========================================================================
+    // Way-shadow loading:
+    // Read all 4 ways for the incoming request set so the FSM can check
+    // hit/miss in a single cycle after loading.
+    // =========================================================================
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            read_way_cnt <= 2'd0;
+            ways_loaded  <= 1'b0;
+        end else begin
+            case (state)
+                IDLE: begin
+                    if (cpu_req) begin
+                        // Initiate sequential read of all 4 ways
+                        read_way_cnt <= 2'd0;
+                        ways_loaded  <= 1'b0;
+                    end
+                end
+                default: begin
+                    // Capture read output one cycle after issuing read
+                    if (!ways_loaded) begin
+                        // Store result of previous read
+                        way_tag  [read_way_cnt - 1] <= rd_tag_out;
+                        way_valid[read_way_cnt - 1] <= rd_valid_out;
+                        way_dirty[read_way_cnt - 1] <= rd_dirty_out;
+                        way_data [read_way_cnt - 1] <= rd_data_out;
+
+                        if (read_way_cnt == 2'd0) begin
+                            ways_loaded <= 1'b1; // All 4 stored
+                        end else begin
+                            read_way_cnt <= read_way_cnt - 2'd1;
+                        end
+                    end
+                end
+            endcase
+        end
+    end
+
+    // =========================================================================
+    // Hit detection (combinational, uses way_* shadow registers)
+    // =========================================================================
+    always @(*) begin
+        cache_hit = 1'b0;
+        hit_way   = 2'd0;
+        for (w = 0; w < 4; w = w + 1) begin
+            if (way_valid[w] && (way_tag[w] == addr_tag)) begin
+                cache_hit = 1'b1;
+                hit_way   = w[1:0];
+            end
+        end
+    end
+
+    // =========================================================================
+    // FSM Next-state + output logic (combinational)
+    // =========================================================================
+    always @(*) begin
+        // Default outputs (de-asserted)
+        next_state         = state;
+        cpu_ready          = 1'b0;
+        cpu_rd_data        = 32'b0;
+        mem_req            = 1'b0;
+        mem_rw             = 1'b0;
+        mem_addr           = 32'b0;
+        mem_wr_data        = 512'b0;
+        ma_wr_en           = 1'b0;
+        ma_wr_index        = addr_index;
+        ma_wr_way          = 2'd0;
+        ma_wr_data         = 512'b0;
+        ma_wr_tag          = 19'b0;
+        ma_wr_valid        = 1'b0;
+        ma_wr_dirty        = 1'b0;
+        ma_rd_index        = addr_index;
+        ma_rd_way          = 2'd0;
+        ma_word_wr_en      = 1'b0;
+        ma_word_wr_index   = addr_index;
+        ma_word_wr_way     = 2'd0;
+        ma_word_wr_offset  = addr_word;
+        ma_word_wr_data    = cpu_wr_data;
+        ma_word_wr_dirty   = 1'b1;
+        lru_update_en      = 1'b0;
+        lru_update_index   = addr_index;
+        lru_update_way     = 2'd0;
+
+        case (state)
+
+            // -----------------------------------------------------------------
+            IDLE: begin
+                if (cpu_req) begin
+                    // Issue read for way 0 immediately; will cycle through
+                    // all 4 ways to populate shadow registers.
+                    ma_rd_index = addr_index;
+                    ma_rd_way   = 2'd3; // Start reading way 3 first (result
+                                        // available next cycle as way 2, etc.)
+                    if (!cpu_rw)
+                        next_state = READ_MISS; // Resolved to HIT or MISS
+                                                // once ways_loaded
+                    else
+                        next_state = WRITE_MISS;
+                end
+            end
+
+            // -----------------------------------------------------------------
+            READ_HIT: begin
+                // Return the requested word to the CPU
+                cpu_rd_data = way_data[hit_way][addr_word*32 +: 32];
+                cpu_ready   = 1'b1;
+
+                // Update LRU - mark this way as MRU
+                lru_update_en    = 1'b1;
+                lru_update_index = addr_index;
+                lru_update_way   = hit_way;
+
+                next_state = IDLE;
+            end
+
+            // -----------------------------------------------------------------
+            READ_MISS: begin
+                if (!ways_loaded) begin
+                    // Still loading ways - stay and keep reading
+                    ma_rd_index = addr_index;
+                    ma_rd_way   = read_way_cnt;
+                end else begin
+                    // Ways loaded - decide HIT or MISS
+                    if (cache_hit) begin
+                        next_state = READ_HIT;
+                    end else begin
+                        // Need to bring block from memory
+                        // Check if victim is dirty -> must evict first
+                        victim_way = lru_way_out; // Registered in EVICT
+                        if (way_valid[lru_way_out] && way_dirty[lru_way_out]) begin
+                            next_state = EVICT;
+                        end else begin
+                            // Victim clean or invalid -> fetch directly
+                            mem_req  = 1'b1;
+                            mem_rw   = 1'b0; // Read from memory
+                            mem_addr = {addr_tag, addr_index, 6'b0};
+                            if (mem_ready) begin
+                                // Allocate fetched block
+                                ma_wr_en    = 1'b1;
+                                ma_wr_index = addr_index;
+                                ma_wr_way   = lru_way_out;
+                                ma_wr_data  = mem_rd_data;
+                                ma_wr_tag   = addr_tag;
+                                ma_wr_valid = 1'b1;
+                                ma_wr_dirty = 1'b0;
+
+                                // Update LRU
+                                lru_update_en    = 1'b1;
+                                lru_update_index = addr_index;
+                                lru_update_way   = lru_way_out;
+
+                                // Return requested word
+                                cpu_rd_data = mem_rd_data[addr_word*32 +: 32];
+                                cpu_ready   = 1'b1;
+                                next_state  = IDLE;
+                            end
+                        end
+                    end
+                end
+            end
+
+            // -----------------------------------------------------------------
+            WRITE_HIT: begin
+                // Update only the written word; mark block dirty (write-back)
+                ma_word_wr_en     = 1'b1;
+                ma_word_wr_index  = addr_index;
+                ma_word_wr_way    = hit_way;
+                ma_word_wr_offset = addr_word;
+                ma_word_wr_data   = cpu_wr_data;
+                ma_word_wr_dirty  = 1'b1;
+
+                // Update LRU
+                lru_update_en    = 1'b1;
+                lru_update_index = addr_index;
+                lru_update_way   = hit_way;
+
+                cpu_ready  = 1'b1;
+                next_state = IDLE;
+            end
+
+            // -----------------------------------------------------------------
+            WRITE_MISS: begin
+                if (!ways_loaded) begin
+                    ma_rd_index = addr_index;
+                    ma_rd_way   = read_way_cnt;
+                end else begin
+                    if (cache_hit) begin
+                        next_state = WRITE_HIT;
+                    end else begin
+                        // Write-allocate: fetch block, then write
+                        if (way_valid[lru_way_out] && way_dirty[lru_way_out]) begin
+                            next_state = EVICT;
+                        end else begin
+                            mem_req  = 1'b1;
+                            mem_rw   = 1'b0;
+                            mem_addr = {addr_tag, addr_index, 6'b0};
+                            if (mem_ready) begin
+                                // Allocate block then apply the write
+                                ma_wr_en    = 1'b1;
+                                ma_wr_index = addr_index;
+                                ma_wr_way   = lru_way_out;
+                                ma_wr_data  = mem_rd_data;
+                                ma_wr_tag   = addr_tag;
+                                ma_wr_valid = 1'b1;
+                                ma_wr_dirty = 1'b0;
+
+                                next_state = WRITE_HIT; // Apply actual write word
+                            end
+                        end
+                    end
+                end
+            end
+
+            // -----------------------------------------------------------------
+            EVICT: begin
+                // Write the dirty victim block back to main memory
+                mem_req     = 1'b1;
+                mem_rw      = 1'b1; // Write to memory
+                mem_addr    = {way_tag[victim_way], addr_index, 6'b0};
+                mem_wr_data = way_data[victim_way];
+
+                if (mem_ready) begin
+                    // Clear dirty bit of victim
+                    ma_wr_en    = 1'b1;
+                    ma_wr_index = addr_index;
+                    ma_wr_way   = victim_way;
+                    ma_wr_data  = way_data[victim_way];
+                    ma_wr_tag   = way_tag[victim_way];
+                    ma_wr_valid = 1'b1;
+                    ma_wr_dirty = 1'b0; // Mark clean after writeback
+
+                    // Now go fetch the new block
+                    next_state = (cpu_rw) ? WRITE_MISS : READ_MISS;
+                end
+            end
+
+        endcase
+    end
+
+    // =========================================================================
+    // Latch victim_way when entering EVICT
+    // =========================================================================
+    always @(posedge clk or posedge rst) begin
+        if (rst)
+            victim_way <= 2'd0;
+        else if (state == READ_MISS || state == WRITE_MISS)
+            victim_way <= lru_way_out; // Save before state changes
+    end
+
+endmodule
