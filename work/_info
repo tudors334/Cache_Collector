@@ -4,14 +4,14 @@ K3
 cModel Technology
 dD:\ModelSim\modelsim\win32aloem
 vcache_controller
-!s100 Vgn];W=kDCELzA8Yg<WNo2
-ITL=^A3g<WB8`Il`g?1f8O2
+!s100 mh;Gnz<LP0kFT1G9fk;[k3
+I[VALhgeoPR5E`<V>L0VHU1
 VQfA<`o4omYTXDWKXNbJ3J2
 Z0 dC:\Users\PatrickNinja\Desktop\GIT\CACHE_GIT
-w1779361228
+w1779716030
 8cache_controller.v
 Fcache_controller.v
-L0 13
+L0 28
 Z1 OV;L;6.5b;42
 r1
 !s85 0
@@ -19,14 +19,14 @@ r1
 !s101 -O0
 o-O0
 vcache_tb
-!s100 <_LcDiKU<zOVNc0ajTKEZ2
-I2iH]gfhnVofi1?5V`Ek`=1
+!s100 gAKeEkji7RB6@KNXmAe`O1
+IN5IKkAC`XX9ZRc?do5i`E1
 VYbIf4GShkndohaboh3SJT2
 Z2 dC:\Users\PatrickNinja\Desktop\GIT\CACHE_GIT
-w1779361238
+w1779716034
 8cache_tb.v
 Fcache_tb.v
-L0 6
+L0 12
 R1
 r1
 !s85 0
@@ -34,7 +34,6 @@ r1
 !s101 -O0
 o-O0
 vlru_controller
-!s100 GZc4ekAmcdcCz:>:L??[V2
 I926g6iNB525ENBYm>3S;n0
 V?ThIbCc`f8@4mQ;8`eMYC1
 R2
@@ -44,12 +43,12 @@ Flru_controller.v
 L0 12
 R1
 r1
-!s85 0
 31
-!s101 -O0
 o-O0
+!s100 GZc4ekAmcdcCz:>:L??[V2
+!s85 0
+!s101 -O0
 vmemory_array
-!s100 dl3`3F7I>cZmANEEo>4:_0
 I@>`BlfzcneDlVH_3a:^]o2
 VnHK<z7^YjHn8iJdSC5^m>3
 R2
@@ -59,7 +58,8 @@ Fmemory_array.v
 L0 13
 R1
 r1
-!s85 0
 31
-!s101 -O0
 o-O0
+!s100 dl3`3F7I>cZmANEEo>4:_0
+!s85 0
+!s101 -O0

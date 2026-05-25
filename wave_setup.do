@@ -1,7 +1,8 @@
 # wave_setup.do  -  Compileaza, simuleaza si adauga semnale in wave
 # Folosire: do wave_setup.do
 
-vlog memory_array.v lru_controller.v cache_controller.v cache_tb.v
+# [Corectat] Compilăm doar fișierele actuale din proiect
+vlog cache_controller.v cache_tb.v
 
 vsim -t 1ps cache_tb
 
@@ -26,7 +27,8 @@ add wave -color Orange   -label "mem_addr"    /cache_tb/mem_addr
 add wave -color Red      -label "mem_ready"   /cache_tb/mem_ready
 
 add wave -divider "=== FSM CACHE ==="
-add wave -color Magenta  -label "FSM_state"   /cache_tb/w_fsm
+# [Corectat] Schimbat din w_fsm in w_fsm_state conform definitiei din cache_tb.v
+add wave -color Magenta  -label "FSM_state"   /cache_tb/w_fsm_state
 add wave -color Magenta  -label "cache_hit"   /cache_tb/dut/cache_hit
 add wave -color Magenta  -label "victim_way"  /cache_tb/dut/victim
 add wave -color Magenta  -label "hit_way"     /cache_tb/dut/hit_way
@@ -36,8 +38,8 @@ add wave -color Cyan     -label "OP 0R-1W"    /cache_tb/w_op
 add wave -color Yellow   -label "HIT-MISS"    /cache_tb/w_hit
 add wave -color Red      -label "EVICT"       /cache_tb/w_evict
 add wave -color White    -label "ADDR"        /cache_tb/w_addr
-add wave -color LightBlue -label "WR_DATA"   /cache_tb/w_wdata
-add wave -color LightBlue -label "RD_DATA"   /cache_tb/w_rdata
+add wave -color LightBlue -label "WR_DATA"    /cache_tb/w_wdata
+add wave -color LightBlue -label "RD_DATA"    /cache_tb/w_rdata
 
 add wave -divider "=== STATISTICI ==="
 add wave -color Green    -label "TOTAL"       /cache_tb/w_total
