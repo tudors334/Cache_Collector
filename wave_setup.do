@@ -1,10 +1,36 @@
-# wave_setup.do  -  Compileaza, simuleaza si adauga semnale in wave
+# wave_setup.do  –  Compileaza, simuleaza si adauga semnale in wave
+# Seed aleator generat la fiecare rulare din ora/minutul/secunda sistemului
 # Folosire: do wave_setup.do
 
-# [Corectat] Compilăm doar fișierele actuale din proiect
+# =========================================================================
+# Genereaza seed din timp (ora * 3600 + minute * 60 + secunde)
+# Astfel fiecare rulare are un seed unic si reproductibil (daca stii ora)
+# =========================================================================
+set now      [clock seconds]
+set hh       [clock format $now -format "%H"]
+set mm       [clock format $now -format "%M"]
+set ss       [clock format $now -format "%S"]
+set run_seed [expr {int(($hh * 3600) + ($mm * 60) + $ss)}]
+
+echo ""
+echo "================================================================="
+echo "  SEED generat din timp: ora=$hh min=$mm sec=$ss -> SEED=$run_seed"
+echo "================================================================="
+echo ""
+
+# =========================================================================
+# Compilare
+# =========================================================================
 vlog cache_controller.v cache_tb.v
 
-vsim -t 1ps cache_tb
+# =========================================================================
+# Simulare cu seed injectat ca parameter generic
+# Nota: -GNAME=VALUE este sintaxa corecta pentru ModelSim 6.5b (fara spatiu)
+# int() previne Tcl sa adauge '.' la numere floating point
+# =========================================================================
+onbreak {resume}
+vsim -t 1ps -GSEED=$run_seed cache_tb
+onbreak {}
 
 wave zoom full
 
@@ -27,7 +53,6 @@ add wave -color Orange   -label "mem_addr"    /cache_tb/mem_addr
 add wave -color Red      -label "mem_ready"   /cache_tb/mem_ready
 
 add wave -divider "=== FSM CACHE ==="
-# [Corectat] Schimbat din w_fsm in w_fsm_state conform definitiei din cache_tb.v
 add wave -color Magenta  -label "FSM_state"   /cache_tb/w_fsm_state
 add wave -color Magenta  -label "cache_hit"   /cache_tb/dut/cache_hit
 add wave -color Magenta  -label "victim_way"  /cache_tb/dut/victim
@@ -46,7 +71,10 @@ add wave -color Green    -label "TOTAL"       /cache_tb/w_total
 add wave -color Green    -label "HITS"        /cache_tb/w_hits
 add wave -color Red      -label "MISSES"      /cache_tb/w_misses
 add wave -color Orange   -label "EVACUARI"    /cache_tb/w_evictions
-add wave -color Gold     -label "HIT RATE"    /cache_tb/w_hitrate
+add wave -color Gold     -label "HIT RATE %"  /cache_tb/w_hitrate
+
+add wave -divider "=== SEED (reproductibilitate) ==="
+add wave -color White    -label "SEED"        /cache_tb/mem_seed
 
 add wave -divider "=== ADRESA DECODATA ==="
 add wave -color White    -label "TAG"         /cache_tb/dut/s_tag
